@@ -47,6 +47,9 @@ if cookies_content:
     with open(cookie_file_path, "w") as f:
         f.write(cookies_content)
 
+# --- Handle proxy ---
+proxy_url = os.getenv("YTDLP_PROXY")  # optional
+
 # --- Helpers ---
 def youtube_search(query, max_results=max_results):
     ydl_opts = {
@@ -57,6 +60,8 @@ def youtube_search(query, max_results=max_results):
     }
     if cookie_file_path:
         ydl_opts["cookiefile"] = cookie_file_path
+    if proxy_url:
+        ydl_opts["proxy"] = proxy_url
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
     return info.get("entries", [])
@@ -133,13 +138,15 @@ def download_mp3_with_thumb(url, filename=None, embed_thumbnail=EMBED_THUMBNAIL)
     }
     if cookie_file_path:
         ydl_opts["cookiefile"] = cookie_file_path
+    if proxy_url:
+        ydl_opts["proxy"] = proxy_url
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
     except yt_dlp.utils.DownloadError as e:
-        if "Sign in to confirm you’re not a bot" in str(e):
-            logging.warning(f"Skipping video (requires login/bot check): {url}")
+        if "Sign in to confirm you’re not a bot" in str(e) or "region-restricted" in str(e):
+            logging.warning(f"Skipping video (login/region restriction): {url}")
             return None, None, None, None
         else:
             raise
@@ -279,12 +286,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url = f"https://www.youtube.com/watch?v={video.get('id')}"
 
         temp_msg = await query.message.reply_text(f"⏳ Downloading: {video.get('title')}")
-
         mp3_file = None
         try:
             mp3_file, raw_title, thumbnail_url, uploader = await download_mp3_with_thumb_async(url, embed_thumbnail=EMBED_THUMBNAIL)
             if not mp3_file:
-                await query.message.reply_text("❌ This video cannot be downloaded (login or region restriction).")
+                await query.message.reply_text("❌ Cannot download this video (login or region restriction).")
                 return
 
             artist, title = parse_artist_title(raw_title or video.get("title", "Unknown"))
@@ -308,7 +314,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Main ---
 def main():
     if not TOKEN or TOKEN == "YourTokenHere":
-        raise RuntimeError("Set TELEGRAM_TOKEN environment variable or put your token in the code.")
+        raise RuntimeError("Set TELEGRAM_TOKEN environment variable.")
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_handler))
