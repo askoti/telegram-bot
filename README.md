@@ -90,10 +90,6 @@ Contributions are welcome! Feel free to open issues or submit pull requests to e
 
 ---
 
-## License
-
-MIT License. See LICENSE for details. 
-
----
+## Demo
 
 ![Telegram Music Bot Demo](demo.GIF)
