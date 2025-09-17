@@ -5,11 +5,8 @@ import time
 import logging
 import yt_dlp
 import asyncio
-from dotenv import load_dotenv
-load_dotenv()
 from concurrent.futures import ThreadPoolExecutor
 from collections import OrderedDict
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -22,13 +19,12 @@ from telegram.ext import (
 
 # --- Config ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN") or "YourTokenHere"
-# Tunables
 page_size = 10
-max_results = 30                # reduced from 100 for speed
-SEARCH_TTL = 300                # seconds to keep cached search results
-THREAD_WORKERS = 2              # lower default because embedding thumbnails is CPU-heavy
-TEMP_DIR = "/tmp"               # where to store temporary files
-EMBED_THUMBNAIL = True          # embed thumbnail into mp3 (slower, CPU-heavy)
+max_results = 30
+SEARCH_TTL = 300
+THREAD_WORKERS = 2
+TEMP_DIR = "/tmp"
+EMBED_THUMBNAIL = True
 
 # --- Logging ---
 logging.basicConfig(
@@ -36,16 +32,20 @@ logging.basicConfig(
 )
 
 # --- Global Store ---
-search_results = {}         # {chat_id: results_list}
-search_messages = {}        # {chat_id: search_box_message_id}
-user_query_messages = {}    # {chat_id: user_query_message_id}
-
-# Simple LRU-style cache for queries keyed by (chat_id, query_text) -> (ts, results)
+search_results = {}
+search_messages = {}
+user_query_messages = {}
 _search_cache = OrderedDict()
 SEARCH_CACHE_MAX = 200
-
-# ThreadPool for blocking work
 _executor = ThreadPoolExecutor(max_workers=THREAD_WORKERS)
+
+# --- Handle cookies ---
+cookies_content = os.getenv("YOUTUBE_COOKIES")
+cookie_file_path = None
+if cookies_content:
+    cookie_file_path = os.path.join(TEMP_DIR, "cookies.txt")
+    with open(cookie_file_path, "w") as f:
+        f.write(cookies_content)
 
 # --- Helpers ---
 def youtube_search(query, max_results=max_results):
@@ -55,6 +55,8 @@ def youtube_search(query, max_results=max_results):
         "extract_flat": "in_playlist",
         "format": "bestaudio/best",
     }
+    if cookie_file_path:
+        ydl_opts["cookiefile"] = cookie_file_path
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
     return info.get("entries", [])
@@ -108,10 +110,6 @@ def build_keyboard(results, page, query_id, include_close=True):
     return InlineKeyboardMarkup(keyboard)
 
 def download_mp3_with_thumb(url, filename=None, embed_thumbnail=EMBED_THUMBNAIL):
-    """
-    Blocking download function using yt-dlp, embedding thumbnail into MP3 when requested.
-    Returns: (out_mp3_path, title, thumbnail_url, uploader)
-    """
     if filename is None:
         base = os.path.join(TEMP_DIR, f"yt_{int(time.time()*1000)}")
     else:
@@ -119,14 +117,9 @@ def download_mp3_with_thumb(url, filename=None, embed_thumbnail=EMBED_THUMBNAIL)
     outtmpl = base + ".%(ext)s"
 
     postprocessors = [
-        {
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        },
+        {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"},
         {"key": "FFmpegMetadata", "add_metadata": True},
     ]
-    # Embedding thumbnail adds an extra ffmpeg step, slower but includes image in MP3.
     if embed_thumbnail:
         postprocessors.append({"key": "EmbedThumbnail"})
 
@@ -138,21 +131,32 @@ def download_mp3_with_thumb(url, filename=None, embed_thumbnail=EMBED_THUMBNAIL)
         "noplaylist": True,
         "postprocessors": postprocessors,
     }
+    if cookie_file_path:
+        ydl_opts["cookiefile"] = cookie_file_path
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        mp3_path = None
-        base_prefix = os.path.basename(base)
-        for fname in os.listdir(TEMP_DIR):
-            if fname.startswith(base_prefix) and fname.lower().endswith(".mp3"):
-                mp3_path = os.path.join(TEMP_DIR, fname)
-                break
-        title = info.get("title")
-        thumbnail = info.get("thumbnail")
-        uploader = info.get("uploader")
-        return mp3_path, title, thumbnail, uploader
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+    except yt_dlp.utils.DownloadError as e:
+        if "Sign in to confirm you’re not a bot" in str(e):
+            logging.warning(f"Skipping video (requires login/bot check): {url}")
+            return None, None, None, None
+        else:
+            raise
 
-# --- Async wrappers for blocking calls ---
+    mp3_path = None
+    base_prefix = os.path.basename(base)
+    for fname in os.listdir(TEMP_DIR):
+        if fname.startswith(base_prefix) and fname.lower().endswith(".mp3"):
+            mp3_path = os.path.join(TEMP_DIR, fname)
+            break
+
+    title = info.get("title")
+    thumbnail = info.get("thumbnail")
+    uploader = info.get("uploader")
+    return mp3_path, title, thumbnail, uploader
+
+# --- Async wrappers ---
 async def youtube_search_async(query, max_results=max_results):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, lambda: youtube_search(query, max_results))
@@ -170,7 +174,6 @@ async def remove_file_async(path):
     except Exception:
         pass
 
-# --- Simple LRU TTL cache utilities ---
 def _cache_set(key, results):
     ts = time.time()
     if key in _search_cache:
@@ -279,18 +282,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         mp3_file = None
         try:
-            # Download and embed thumbnail (blocking work in executor)
             mp3_file, raw_title, thumbnail_url, uploader = await download_mp3_with_thumb_async(url, embed_thumbnail=EMBED_THUMBNAIL)
-            if not mp3_file or not os.path.exists(mp3_file):
-                raise RuntimeError("Downloaded file not found")
+            if not mp3_file:
+                await query.message.reply_text("❌ This video cannot be downloaded (login or region restriction).")
+                return
 
             artist, title = parse_artist_title(raw_title or video.get("title", "Unknown"))
 
-            # Stream file to Telegram
             with open(mp3_file, "rb") as fh:
                 await query.message.reply_audio(audio=fh, title=title, performer=artist)
 
-            # schedule deletion
             await remove_file_async(mp3_file)
 
         except Exception as e:
@@ -306,14 +307,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Main ---
 def main():
-    if not TOKEN or TOKEN == "PASTE_YOUR_TOKEN_HERE":
+    if not TOKEN or TOKEN == "YourTokenHere":
         raise RuntimeError("Set TELEGRAM_TOKEN environment variable or put your token in the code.")
     app = Application.builder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_handler))
     app.add_handler(CallbackQueryHandler(button_callback))
-
     print("Bot is starting... Press Ctrl+C to stop.")
     app.run_polling()
 
