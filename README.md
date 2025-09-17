@@ -105,4 +105,4 @@ This README:
 
 ---
 
-![Telegram Music Bot Demo](demo.gif)
+![Telegram Music Bot Demo](demo.GIF)
