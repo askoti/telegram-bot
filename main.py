@@ -26,6 +26,7 @@ max_results = 30
 SEARCH_TTL = 300
 THREAD_WORKERS = 2
 TEMP_DIR = "/tmp"
+EMBED_THUMBNAIL = True  # Enable thumbnail embedding
 
 # --- Logging ---
 logging.basicConfig(
@@ -97,21 +98,27 @@ def build_keyboard(results, page, query_id, include_close=True):
         keyboard.append(nav)
     return InlineKeyboardMarkup(keyboard)
 
-def download_mp3(url, filename=None):
+def download_mp3(url, filename=None, embed_thumbnail=EMBED_THUMBNAIL):
     if filename is None:
         base = os.path.join(TEMP_DIR, f"yt_{int(time.time()*1000)}")
     else:
         base = os.path.join(TEMP_DIR, filename.replace(".mp3", ""))
     outtmpl = base + ".%(ext)s"
 
+    postprocessors = [
+        {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"},
+        {"key": "FFmpegMetadata", "add_metadata": True},
+    ]
+    if embed_thumbnail:
+        postprocessors.append({"key": "EmbedThumbnail"})
+
     ydl_opts = {
         "format": "bestaudio/best",
         "outtmpl": outtmpl,
+        "writethumbnail": True,
         "quiet": True,
         "noplaylist": True,
-        "postprocessors": [
-            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"},
-        ],
+        "postprocessors": postprocessors,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -142,7 +149,7 @@ async def remove_file_async(path):
         except Exception:
             pass
 
-# --- Simple cache ---
+# --- Cache ---
 def _cache_set(key, results):
     ts = time.time()
     if key in _search_cache:
