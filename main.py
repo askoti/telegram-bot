@@ -129,13 +129,13 @@ def download_mp3_with_thumb(url, filename=None, embed_thumbnail=EMBED_THUMBNAIL,
         postprocessors.append({"key": "EmbedThumbnail"})
 
     ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": outtmpl,
-        "writethumbnail": True,
         "quiet": True,
-        "noplaylist": True,
-        "postprocessors": postprocessors,
+        "skip_download": False,
+        "extract_flat": "in_playlist",
+        "format": "bestaudio/best",
+        "cookiefile": os.environ.get("YOUTUBE_COOKIES")  # path to cookies
     }
+
 
     if cookie_file_path:
         ydl_opts["cookiefile"] = cookie_file_path
