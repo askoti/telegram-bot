@@ -5,8 +5,11 @@ import time
 import logging
 import yt_dlp
 import asyncio
+from dotenv import load_dotenv
+load_dotenv()
 from concurrent.futures import ThreadPoolExecutor
 from collections import OrderedDict
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -19,6 +22,15 @@ from telegram.ext import (
 
 # --- Config ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN") or "YourTokenHere"
+cookie_content = os.getenv("YOUTUBE_COOKIES", None)
+cookie_file_path = "/tmp/cookies.txt" if cookie_content else None
+
+if cookie_content:
+    # Write cookies to temp file for yt-dlp
+    with open(cookie_file_path, "w", encoding="utf-8") as f:
+        f.write(cookie_content)
+
+# Tunables
 page_size = 10
 max_results = 30
 SEARCH_TTL = 300
@@ -31,24 +43,13 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
-# --- Global Store ---
+# --- Global Stores ---
 search_results = {}
 search_messages = {}
 user_query_messages = {}
 _search_cache = OrderedDict()
 SEARCH_CACHE_MAX = 200
 _executor = ThreadPoolExecutor(max_workers=THREAD_WORKERS)
-
-# --- Handle cookies ---
-cookies_content = os.getenv("YOUTUBE_COOKIES")
-cookie_file_path = None
-if cookies_content:
-    cookie_file_path = os.path.join(TEMP_DIR, "cookies.txt")
-    with open(cookie_file_path, "w") as f:
-        f.write(cookies_content)
-
-# --- Handle proxy ---
-proxy_url = os.getenv("YTDLP_PROXY")  # optional
 
 # --- Helpers ---
 def youtube_search(query, max_results=max_results):
@@ -60,8 +61,7 @@ def youtube_search(query, max_results=max_results):
     }
     if cookie_file_path:
         ydl_opts["cookiefile"] = cookie_file_path
-    if proxy_url:
-        ydl_opts["proxy"] = proxy_url
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
     return info.get("entries", [])
@@ -114,7 +114,7 @@ def build_keyboard(results, page, query_id, include_close=True):
         keyboard.append(nav)
     return InlineKeyboardMarkup(keyboard)
 
-def download_mp3_with_thumb(url, filename=None, embed_thumbnail=EMBED_THUMBNAIL):
+def download_mp3_with_thumb(url, filename=None, embed_thumbnail=EMBED_THUMBNAIL, use_proxy=False):
     if filename is None:
         base = os.path.join(TEMP_DIR, f"yt_{int(time.time()*1000)}")
     else:
@@ -136,16 +136,23 @@ def download_mp3_with_thumb(url, filename=None, embed_thumbnail=EMBED_THUMBNAIL)
         "noplaylist": True,
         "postprocessors": postprocessors,
     }
+
     if cookie_file_path:
         ydl_opts["cookiefile"] = cookie_file_path
-    if proxy_url:
-        ydl_opts["proxy"] = proxy_url
+
+    if use_proxy:
+        proxy_url = os.getenv("YTDLP_PROXY")
+        if proxy_url:
+            ydl_opts["proxy"] = proxy_url
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
     except yt_dlp.utils.DownloadError as e:
-        if "Sign in to confirm you’re not a bot" in str(e) or "region-restricted" in str(e):
+        err_text = str(e).lower()
+        if "sign in to confirm" in err_text or "region-restricted" in err_text:
+            if not use_proxy and os.getenv("YTDLP_PROXY"):
+                return download_mp3_with_thumb(url, filename, embed_thumbnail, use_proxy=True)
             logging.warning(f"Skipping video (login/region restriction): {url}")
             return None, None, None, None
         else:
@@ -181,6 +188,7 @@ async def remove_file_async(path):
     except Exception:
         pass
 
+# --- Simple LRU cache ---
 def _cache_set(key, results):
     ts = time.time()
     if key in _search_cache:
@@ -290,7 +298,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             mp3_file, raw_title, thumbnail_url, uploader = await download_mp3_with_thumb_async(url, embed_thumbnail=EMBED_THUMBNAIL)
             if not mp3_file:
-                await query.message.reply_text("❌ Cannot download this video (login or region restriction).")
+                await query.message.reply_text("❌ Cannot download this video (login/region restriction).")
                 return
 
             artist, title = parse_artist_title(raw_title or video.get("title", "Unknown"))
