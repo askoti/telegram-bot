@@ -92,16 +92,7 @@ Contributions are welcome! Feel free to open issues or submit pull requests to e
 
 ## License
 
-MIT License. See LICENSE for details.
-
----
-
-This README:  
-
-- Explains **what the bot does** in simple terms.  
-- Includes **installation & deployment instructions**.  
-- Mentions **limitations** (restricted videos) without exposing private tokens or cookies.  
-- Looks professional for GitHub — good for showing off your project.  
+MIT License. See LICENSE for details. 
 
 ---
 
